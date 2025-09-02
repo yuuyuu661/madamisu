@@ -35,9 +35,13 @@ VALUE_SIZE  = int(34 * FONT_SCALE)  # 旧30
 NOTE_SIZE   = int(30 * FONT_SCALE)  # 旧28
 FOOTER_SIZE = int(22 * FONT_SCALE)  # 旧20
 
-STROKE_TITLE = int(os.getenv("STROKE_TITLE", "4"))  # タイトルのフチ太さ
-STROKE_BODY  = int(os.getenv("STROKE_BODY",  "3"))  # 本文・値・一言のフチ太さ
+# 黒フチ（外側）と白ストローク（内側＝太らせ用）
+STROKE_TITLE = int(os.getenv("STROKE_TITLE", "5"))  # タイトルの黒フチ太さ
+STROKE_BODY  = int(os.getenv("STROKE_BODY",  "4"))  # 本文などの黒フチ太さ
+INLINE_STROKE_TITLE = int(os.getenv("INLINE_STROKE_TITLE", str(max(STROKE_TITLE-2, 1))))
+INLINE_STROKE_BODY  = int(os.getenv("INLINE_STROKE_BODY",  str(max(STROKE_BODY-2,  1))))
 
+# テキスト位置
 LABEL_X = int(os.getenv("LABEL_X", "74"))
 VALUE_X = int(os.getenv("VALUE_X", "360"))  # 値の列のX座標（380〜420などで微調整可）
 
@@ -119,44 +123,44 @@ def _reveal_payload(s: str) -> Optional[str]:
         return s
     return None
 
-# ========= テキスト描画（白＋黒フチ、Pillow10対応） =========
-def draw_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str,
-              font: ImageFont.ImageFont, fill=(255, 255, 255),
-              bold: bool = True, stroke_width: int = 3, outline=(0, 0, 0)):
-    if bold:
+# ========= テキスト描画（ダブルストローク：黒→白） =========
+def draw_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str, font: ImageFont.ImageFont,
+              fill=(255, 255, 255), outline=(0, 0, 0),
+              outline_w: int = 4, inline_w: int = 2):
+    # 外側：黒フチ（太め）
+    if outline_w > 0:
         draw.text(xy, text, font=font, fill=fill,
-                  stroke_width=stroke_width, stroke_fill=outline)
+                  stroke_width=outline_w, stroke_fill=outline)
+    # 内側：白ストローク（少し細く）→“太字化”＋黒フチを残す
+    if inline_w > 0:
+        draw.text(xy, text, font=font, fill=fill,
+                  stroke_width=inline_w, stroke_fill=fill)
     else:
         draw.text(xy, text, font=font, fill=fill)
 
-def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
-                   font: ImageFont.ImageFont, fill=(255,255,255),
-                   max_width: int = 800, line_spacing: int = 6,
-                   bold: bool = True, stroke_width: int = 3, outline=(0,0,0)):
+def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int], font: ImageFont.ImageFont,
+                   fill=(255,255,255), max_width: int = 800, line_spacing: int = 6,
+                   outline=(0,0,0), outline_w: int = 4, inline_w: int = 2):
     if not text:
         return 0
-
     def text_w(s: str) -> int:
         l, t, r, b = draw.textbbox((0, 0), s, font=font)
         return r - l
-
     lines, cur = [], ""
-    for ch in list(text):
+    for ch in text:
         test = cur + ch
         if text_w(test) <= max_width:
             cur = test
         else:
             lines.append(cur); cur = ch
-    if cur:
-        lines.append(cur)
+    if cur: lines.append(cur)
 
     x, y = xy
     total_h = 0
     for line in lines:
         draw_text(draw, (x, y + total_h), line, font=font, fill=fill,
-                  bold=bold, stroke_width=stroke_width, outline=outline)
-        bbox = font.getbbox(line)
-        lh = bbox[3] - bbox[1]
+                  outline=outline, outline_w=outline_w, inline_w=inline_w)
+        bbox = font.getbbox(line); lh = bbox[3] - bbox[1]
         total_h += lh + line_spacing
     return total_h
 
@@ -172,7 +176,7 @@ def fetch_image(url: str) -> Optional[Image.Image]:
         log.warning(f"画像取得失敗: {url} ({e})")
         return None
 
-# ========= パネル生成（値右寄せ／白＋黒フチ／黒幕なし） =========
+# ========= パネル生成（値右寄せ／ダブルストローク／黒幕なし） =========
 def make_panel(
     bg_url: str,
     corner_image_url: str,
@@ -218,7 +222,7 @@ def make_panel(
     # タイトル
     font_title = get_font(TITLE_SIZE)
     draw_text(draw, (70, 60), title, font=font_title,
-              fill=(255, 255, 255), bold=True, stroke_width=STROKE_TITLE)
+              outline_w=STROKE_TITLE, inline_w=INLINE_STROKE_TITLE)
 
     # ラベル＆値（値だけ右へ）
     font_label = get_font(LABEL_SIZE)
@@ -228,10 +232,10 @@ def make_panel(
 
     def put(label: str, value: str):
         nonlocal y
-        draw_text(draw, (LABEL_X, y), label, font=font_label,
-                  fill=(220, 220, 220), bold=True, stroke_width=STROKE_BODY)
+        draw_text(draw, (LABEL_X, y), label, font=font_label, fill=(220,220,220),
+                  outline_w=STROKE_BODY, inline_w=INLINE_STROKE_BODY)
         draw_text(draw, (VALUE_X, y-2), value, font=font_text,
-                  fill=(255, 255, 255), bold=True, stroke_width=STROKE_BODY)
+                  outline_w=STROKE_BODY, inline_w=INLINE_STROKE_BODY)
         y += (font_text.size + line_gap)
 
     put("開催予定日", date_time)
@@ -239,17 +243,17 @@ def make_panel(
     put("想定プレイ時間", duration)
 
     # 一言
-    draw_text(draw, (LABEL_X, y), "一言", font=font_label,
-              fill=(220, 220, 220), bold=True, stroke_width=STROKE_BODY)
+    draw_text(draw, (LABEL_X, y), "一言", font=font_label, fill=(220,220,220),
+              outline_w=STROKE_BODY, inline_w=INLINE_STROKE_BODY)
     y += font_label.size + 10
     y += draw_multiline(draw, note, (LABEL_X, y), font=get_font(NOTE_SIZE),
-                        fill=(245, 245, 245), max_width=W - LABEL_X - 380,
-                        bold=True, stroke_width=STROKE_BODY)
+                        fill=(245,245,245), max_width=W - LABEL_X - 380,
+                        outline_w=STROKE_BODY, inline_w=INLINE_STROKE_BODY)
 
     # 署名
     draw_text(draw, (70, H - 40), "マーダーミステリー開催のお知らせ",
-              font=get_font(FOOTER_SIZE), fill=(200, 200, 200),
-              bold=True, stroke_width=STROKE_BODY)
+              font=get_font(FOOTER_SIZE), fill=(200,200,200),
+              outline_w=STROKE_BODY, inline_w=INLINE_STROKE_BODY)
 
     buf = io.BytesIO()
     base.convert("RGB").save(buf, format="PNG", optimize=True)
