@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import logging
 from typing import Optional, Tuple
 
@@ -83,24 +84,49 @@ def get_font(size: int) -> ImageFont.ImageFont:
     # 3) フォールバック（日本語は豆腐）
     return ImageFont.load_default()
 
-# ========= 太字描画ヘルパ =========
+# ========= 不可視ペイロード（ゼロ幅） =========
+_ZW0, _ZW1, _ZWPREFIX = '\u200B', '\u200C', '\u200D'  # ZWSP/ZWNJ/ZWJ
+
+def _hide_payload(s: str) -> str:
+    """文字列をゼロ幅文字列に変換（見た目は空）。"""
+    b64 = base64.b64encode(s.encode('utf-8'))
+    bits = ''.join(f'{b:08b}' for b in b64)
+    return _ZWPREFIX + ''.join(_ZW1 if bit == '1' else _ZW0 for bit in bits)
+
+def _reveal_payload(s: str) -> Optional[str]:
+    """ゼロ幅文字列から元の文字列を復元。失敗時は None。"""
+    if not s:
+        return None
+    if s.startswith(_ZWPREFIX):
+        bits = ''.join('1' if ch == _ZW1 else '0' for ch in s if ch in (_ZW0, _ZW1))
+        if len(bits) % 8 != 0:
+            return None
+        data = bytes(int(bits[i:i+8], 2) for i in range(0, len(bits), 8))
+        try:
+            return base64.b64decode(data).decode('utf-8')
+        except Exception:
+            return None
+    if 'participant=' in s and 'spectator=' in s:
+        return s
+    return None
+
+# ========= テキスト描画ユーティリティ（Pillow10対応） =========
 def draw_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str,
               font: ImageFont.ImageFont, fill=(255, 255, 255),
-              bold: bool = True, stroke_width: int = 2):
+              bold: bool = True, stroke_width: int = 3, outline=(0, 0, 0)):
     """
-    stroke_fill=fill で“太字風”に描画
+    白塗り＋黒フチ（stroke）で視認性UP。
     """
     if bold:
         draw.text(xy, text, font=font, fill=fill,
-                  stroke_width=stroke_width, stroke_fill=fill)
+                  stroke_width=stroke_width, stroke_fill=outline)
     else:
         draw.text(xy, text, font=font, fill=fill)
 
-# ========= 複数行描画（Pillow10対応・太字） =========
 def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
                    font: ImageFont.ImageFont, fill=(255,255,255),
                    max_width: int = 800, line_spacing: int = 6,
-                   bold: bool = True, stroke_width: int = 2):
+                   bold: bool = True, stroke_width: int = 3, outline=(0,0,0)):
     if not text:
         return 0
 
@@ -114,8 +140,7 @@ def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
         if text_w(test) <= max_width:
             cur = test
         else:
-            lines.append(cur)
-            cur = ch
+            lines.append(cur); cur = ch
     if cur:
         lines.append(cur)
 
@@ -123,7 +148,7 @@ def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
     total_h = 0
     for line in lines:
         draw_text(draw, (x, y + total_h), line, font=font, fill=fill,
-                  bold=bold, stroke_width=stroke_width)
+                  bold=bold, stroke_width=stroke_width, outline=outline)
         bbox = font.getbbox(line)
         lh = bbox[3] - bbox[1]
         total_h += lh + line_spacing
@@ -141,7 +166,7 @@ def fetch_image(url: str) -> Optional[Image.Image]:
         log.warning(f"画像取得失敗: {url} ({e})")
         return None
 
-# ========= パネル生成（値を右寄せ／全部太字／黒幕オフ） =========
+# ========= パネル生成（値を右寄せ／白＋黒フチ／黒幕オフ） =========
 def make_panel(
     bg_url: str,
     corner_image_url: str,
@@ -184,36 +209,36 @@ def make_panel(
 
     draw = ImageDraw.Draw(base)
 
-    # タイトル（太字）
+    # タイトル
     font_title = get_font(48)
-    draw_text(draw, (70, 60), title, font=font_title, fill=(255, 255, 255), bold=True, stroke_width=2)
+    draw_text(draw, (70, 60), title, font=font_title, fill=(255, 255, 255), bold=True, stroke_width=3)
 
-    # ラベル＆値（値だけ右にずらす）
+    # ラベル＆値（値だけ右へ）
     font_label = get_font(28)
     font_text  = get_font(30)
     y = 140
     line_gap = 16
     LABEL_X = 74
-    VALUE_X = 360  # ← 位置は好みで 380〜420 などに
+    VALUE_X = 360  # 調整はここ（380〜420など好みで）
 
     def put(label: str, value: str):
         nonlocal y
-        draw_text(draw, (LABEL_X, y), label, font=font_label, fill=(220, 220, 220), bold=True, stroke_width=2)
-        draw_text(draw, (VALUE_X, y-2), value, font=font_text,  fill=(255, 255, 255), bold=True, stroke_width=2)
+        draw_text(draw, (LABEL_X, y), label, font=font_label, fill=(220, 220, 220), bold=True, stroke_width=3)
+        draw_text(draw, (VALUE_X, y-2), value, font=font_text,  fill=(255, 255, 255), bold=True, stroke_width=3)
         y += (font_text.size + line_gap)
 
     put("開催予定日", date_time)
     put("プレイヤー数", f"{players} 名")
     put("想定プレイ時間", duration)
 
-    # 一言（太字）
-    draw_text(draw, (LABEL_X, y), "一言", font=font_label, fill=(220, 220, 220), bold=True, stroke_width=2)
+    # 一言
+    draw_text(draw, (LABEL_X, y), "一言", font=font_label, fill=(220, 220, 220), bold=True, stroke_width=3)
     y += font_label.size + 10
     y += draw_multiline(draw, note, (LABEL_X, y), font=get_font(28),
                         fill=(245, 245, 245), max_width=W - LABEL_X - 380,
-                        bold=True, stroke_width=2)
+                        bold=True, stroke_width=3)
 
-    # 署名（太字）
+    # 署名
     draw_text(draw, (70, H - 40), "マーダーミステリー開催のお知らせ",
               font=get_font(20), fill=(200, 200, 200), bold=True, stroke_width=2)
 
@@ -242,16 +267,20 @@ class MysterySignupView(discord.ui.View):
         try:
             msg = await interaction.channel.fetch_message(interaction.message.id)
             embed = msg.embeds[0] if msg.embeds else None
-            footer = embed.footer.text if embed and embed.footer else ""
+            footer_raw = embed.footer.text if embed and embed.footer else ""
+
+            payload = _reveal_payload(footer_raw) or ""
             participant_id = spectator_id = None
-            for part in (footer or "").split("|"):
+            for part in payload.split("|"):
                 if part.startswith("participant="):
                     participant_id = int(part.split("=", 1)[1])
                 elif part.startswith("spectator="):
                     spectator_id = int(part.split("=", 1)[1])
+
             target_role_id = participant_id if role_kind == "participant" else spectator_id
             if not target_role_id:
                 return await interaction.response.send_message("ロールIDが設定されていません。パネル作成時の設定をご確認ください。", ephemeral=True)
+
             role = guild.get_role(target_role_id)
             if role is None:
                 return await interaction.response.send_message("ロールが見つかりません。", ephemeral=True)
@@ -378,7 +407,7 @@ async def repair_sync(ctx: commands.Context):
 @tree.command(name="create_mystery_panel", description="マーダーミステリー開催パネルを生成します。")
 @app_commands.describe(
     title="パネル上部に表示するタイトル（例：マダミス開催告知）",
-    date_time="開催予定日（例：2025年9月12日 20:00～）",
+    date_time="開催予定日（例：2025年9月12日）",
     players="プレイヤー数（例：6）",
     duration="想定プレイ時間（例：2～3時間）",
     note="一言コメント（改行可）",
@@ -430,7 +459,8 @@ async def create_mystery_panel(
         color=discord.Color.gold(),
     )
     embed.set_image(url="attachment://mystery_panel.png")
-    embed.set_footer(text=f"participant={pr_id}|spectator={sp_id}")
+    # ロールIDは不可視で埋め込み（UIには表示されない）
+    embed.set_footer(text=_hide_payload(f"participant={pr_id}|spectator={sp_id}"))
 
     view = MysterySignupView()
     await interaction.followup.send(file=file, embed=embed, view=view)
