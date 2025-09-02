@@ -1,7 +1,6 @@
 import os
 import io
 import logging
-import asyncio
 from typing import Optional, Tuple
 
 import requests
@@ -22,7 +21,7 @@ DEFAULT_BG_IMAGE_URL = os.getenv("DEFAULT_BG_IMAGE_URL", "")
 ALLOWED_ROLE_ID = int(os.getenv("ALLOWED_ROLE_ID", "0") or 0)
 DEFAULT_PARTICIPANT_ROLE_ID = int(os.getenv("PARTICIPANT_ROLE_ID", "0") or 0)
 DEFAULT_SPECTATOR_ROLE_ID   = int(os.getenv("SPECTATOR_ROLE_ID", "0") or 0)
-FONT_URL = os.getenv("FONT_URL", "")  # 例: https://github.com/googlefonts/noto-cjk/.../NotoSansJP-Regular.otf?raw=1
+FONT_URL = os.getenv("FONT_URL", "")  # 例: Noto Sans JP の直リンク
 
 # ========= ログ =========
 logging.basicConfig(
@@ -33,53 +32,43 @@ log = logging.getLogger("mysterybot")
 
 # ========= Intents / Bot =========
 intents = discord.Intents.default()
-intents.message_content = False  # スラコマ中心
 intents.guilds = True
 intents.members = True  # ロール付与に必要
+intents.message_content = False
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # ========= フォント取得 =========
 _FONT_CACHE_PATH = "/tmp/mystery_font.ttf"
-_base_font: Optional[ImageFont.FreeTypeFont] = None
-
-def get_font(size: int) -> ImageFont.FreeTypeFont:
-    global _base_font
-    # 既にベースフォントあるならサイズ可変で再読み込み
-    if _base_font is None:
-        if FONT_URL:
-            try:
+def get_font(size: int) -> ImageFont.ImageFont:
+    # 日本語フォントが指定されていればDLして使う
+    if FONT_URL:
+        try:
+            if not os.path.exists(_FONT_CACHE_PATH):
                 r = requests.get(FONT_URL, timeout=15)
                 r.raise_for_status()
                 with open(_FONT_CACHE_PATH, "wb") as f:
                     f.write(r.content)
-                _base_font = ImageFont.truetype(_FONT_CACHE_PATH, size=size)
-                return _base_font
-            except Exception as e:
-                log.warning(f"FONT_URLの取得に失敗しました。デフォルトフォントにフォールバック: {e}")
-
-        # フォールバック（日本語は豆腐の可能性あり）
-        try:
-            return ImageFont.load_default()
-        except Exception:
-            return ImageFont.load_default()
-
-    # 既にダウンロード済みの場合は都度 size 指定で作る
+            return ImageFont.truetype(_FONT_CACHE_PATH, size=size)
+        except Exception as e:
+            log.warning(f"FONT_URL取得失敗。デフォルトにフォールバック: {e}")
+    # フォールバック（日本語は豆腐の可能性あり）
     try:
-        return ImageFont.truetype(_FONT_CACHE_PATH, size=size)
+        return ImageFont.load_default()
     except Exception:
         return ImageFont.load_default()
 
 # ========= テキスト描画ユーティリティ =========
-def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int], font: ImageFont.ImageFont, fill=(255,255,255), max_width: int = 800, line_spacing: int = 6):
+def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
+                   font: ImageFont.ImageFont, fill=(255,255,255),
+                   max_width: int = 800, line_spacing: int = 6):
     """max_widthで簡易改行して描画、描画後の高さを返す"""
     if not text:
         return 0
-    words = list(text)
-    lines = []
-    cur = ""
-    for ch in words:
+    # ざっくり1文字ずつ折り返し（日本語向け）
+    lines, cur = [], ""
+    for ch in list(text):
         test = cur + ch
         w, _ = draw.textsize(test, font=font)
         if w <= max_width:
@@ -94,7 +83,8 @@ def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int], fo
     total_h = 0
     for line in lines:
         draw.text((x, y + total_h), line, font=font, fill=fill)
-        lh = font.getbbox(line)[3] - font.getbbox(line)[1]
+        bbox = font.getbbox(line)
+        lh = bbox[3] - bbox[1]
         total_h += lh + line_spacing
     return total_h
 
@@ -120,14 +110,15 @@ def make_panel(
     canvas_size=(1200, 650),
 ) -> bytes:
     W, H = canvas_size
-    # ベース
     base = Image.new("RGBA", (W, H), (20, 22, 28, 255))
 
     # 背景
     bg = fetch_image(bg_url) if bg_url else None
     if bg:
-        bg = ImageOps.fit(bg, (W, H), method=Image.Resampling.LANCZOS, bleed=0.0, centering=(0.5, 0.5))
-        base = Image.alpha_composite(base, bg.putalpha(180) or bg)  # うっすら
+        bg = ImageOps.fit(bg, (W, H), method=Image.Resampling.LANCZOS)
+        bg = bg.copy()
+        bg.putalpha(180)  # 透過でうっすら
+        base = Image.alpha_composite(base, bg)
 
     # 左の金ライン
     gold = Image.new("RGBA", (18, H), (212, 175, 55, 255))
@@ -136,13 +127,11 @@ def make_panel(
     # 右上コーナー画像（作品画像）
     corner = fetch_image(corner_image_url) if corner_image_url else None
     if corner:
-        # 角丸サムネ
         thumb_w, thumb_h = 340, 340
         corner = ImageOps.fit(corner, (thumb_w, thumb_h), method=Image.Resampling.LANCZOS)
         mask = Image.new("L", (thumb_w, thumb_h), 0)
         mdraw = ImageDraw.Draw(mask)
-        rad = 28
-        mdraw.rounded_rectangle([0, 0, thumb_w, thumb_h], radius=rad, fill=255)
+        mdraw.rounded_rectangle([0, 0, thumb_w, thumb_h], radius=28, fill=255)
         base.paste(corner, (W - thumb_w - 28, 28), mask)
 
     # 半透明の本文パネル
@@ -158,7 +147,6 @@ def make_panel(
     # 情報
     font_label = get_font(28)
     font_text  = get_font(30)
-
     y = 140
     line_gap = 16
 
@@ -175,32 +163,28 @@ def make_panel(
     # 一言
     draw.text((74, y), "一言", font=font_label, fill=(220, 220, 220))
     y += font_label.size + 10
-    y += draw_multiline(draw, note, (74, y), font=get_font(28), fill=(245, 245, 245), max_width= W - 74 - 380)
+    y += draw_multiline(draw, note, (74, y), font=get_font(28), fill=(245, 245, 245), max_width=W - 74 - 380)
 
     # 署名
     font_small = get_font(20)
     draw.text((70, H - 40), "マーダーミステリー開催のお知らせ", font=font_small, fill=(200, 200, 200))
 
-    # 出力
     buf = io.BytesIO()
     base.convert("RGB").save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf.getvalue()
 
-# ========= ボタンView（永続） =========
+# ========= 永続View（ボタン） =========
 class MysterySignupView(discord.ui.View):
-    """custom_idに role_id を埋めておく永続View。再起動後も反応。"""
+    """custom_id固定の永続View。再起動後も反応。"""
     def __init__(self):
         super().__init__(timeout=None)
-        # 永続ボタン（custom_id=固定プレフィックス）
-        self.add_item(discord.ui.Button(label="参加希望", style=discord.ButtonStyle.success, custom_id="mystery_join"))
-        self.add_item(discord.ui.Button(label="観戦希望", style=discord.ButtonStyle.primary, custom_id="mystery_watch"))
 
-    @discord.ui.button(label="参加希望", style=discord.ButtonStyle.success, custom_id="mystery_join", row=0)
+    @discord.ui.button(label="参加希望", style=discord.ButtonStyle.success, custom_id="mystery_join")
     async def on_join(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._toggle_role(interaction, role_kind="participant")
 
-    @discord.ui.button(label="観戦希望", style=discord.ButtonStyle.primary, custom_id="mystery_watch", row=0)
+    @discord.ui.button(label="観戦希望", style=discord.ButtonStyle.primary, custom_id="mystery_watch")
     async def on_watch(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._toggle_role(interaction, role_kind="spectator")
 
@@ -209,12 +193,11 @@ class MysterySignupView(discord.ui.View):
         if guild is None:
             return await interaction.response.send_message("ギルド外では操作できません。", ephemeral=True)
 
-        # メッセージ埋め込みのフッタに role_id を埋めておく設計にしている
         try:
+            # このメッセージのEmbedフッタから role_id を読み取る
             msg = await interaction.channel.fetch_message(interaction.message.id)
             embed = msg.embeds[0] if msg.embeds else None
             footer = embed.footer.text if embed and embed.footer else ""
-            # footer: "participant=<id>|spectator=<id>"
             participant_id = None
             spectator_id = None
             for part in (footer or "").split("|"):
@@ -243,14 +226,15 @@ class MysterySignupView(discord.ui.View):
             log.exception("ロール切り替え時のエラー")
             return await interaction.response.send_message("処理中にエラーが発生しました。", ephemeral=True)
 
-# 起動時に永続Viewを登録
+# ========= 起動時処理 =========
 @bot.event
 async def on_ready():
     try:
-        bot.add_view(MysterySignupView())
+        bot.add_view(MysterySignupView())  # 永続View登録
     except Exception:
         pass
     log.info(f"Logged in as {bot.user} (id={bot.user.id})")
+
     # スラコマ即時同期（ギルド限定）
     try:
         if GUILD_IDS:
@@ -259,7 +243,7 @@ async def on_ready():
             log.info(f"Synced commands to guilds: {GUILD_IDS}")
         else:
             await tree.sync()
-            log.info("Synced commands globally (反映に最大1時間)")
+            log.info("Synced commands globally (反映に時間がかかる場合あり)")
     except Exception as e:
         log.warning(f"Slash command sync failed: {e}")
 
@@ -269,6 +253,48 @@ def is_allowed(interaction: discord.Interaction) -> bool:
         return True
     role = discord.utils.get(interaction.user.roles, id=ALLOWED_ROLE_ID)
     return role is not None
+
+def _is_admin_or_allowed(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    if ALLOWED_ROLE_ID and discord.utils.get(member.roles, id=ALLOWED_ROLE_ID):
+        return True
+    return False
+
+# ========= 強制同期系（テキストコマンド） =========
+@bot.command(name="sync_here")
+async def sync_here(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not _is_admin_or_allowed(ctx.author):
+        return await ctx.reply("権限がありません。", mention_author=False)
+    try:
+        await tree.sync(guild=ctx.guild)
+        await ctx.reply("✅ このサーバーにスラッシュコマンドを同期しました。", mention_author=False)
+    except Exception as e:
+        await ctx.reply(f"❌ 同期失敗: {e}", mention_author=False)
+
+@bot.command(name="clear_and_sync")
+async def clear_and_sync(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not _is_admin_or_allowed(ctx.author):
+        return await ctx.reply("権限がありません。", mention_author=False)
+    try:
+        tree.clear_commands(guild=ctx.guild)  # まず空を同期
+        await tree.sync(guild=ctx.guild)
+        # もう一度、コード上の定義で再同期
+        await tree.sync(guild=ctx.guild)
+        await ctx.reply("🧹→🔁 ギルドコマンドをクリアして再同期しました。", mention_author=False)
+    except Exception as e:
+        await ctx.reply(f"❌ クリア＆同期失敗: {e}", mention_author=False)
+
+@bot.command(name="list_cmds")
+async def list_cmds(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not _is_admin_or_allowed(ctx.author):
+        return
+    try:
+        cmds = tree.get_commands(guild=ctx.guild)
+        names = ", ".join([c.name for c in cmds]) or "(なし)"
+        await ctx.reply(f"このギルドの登録コマンド: {names}", mention_author=False)
+    except Exception as e:
+        await ctx.reply(f"❌ 取得失敗: {e}", mention_author=False)
 
 # ========= /create_mystery_panel =========
 @app_commands.describe(
@@ -304,7 +330,6 @@ async def create_mystery_panel(
     # ロール決定
     pr_id = participant_role.id if participant_role else (DEFAULT_PARTICIPANT_ROLE_ID or 0)
     sp_id = spectator_role.id if spectator_role else (DEFAULT_SPECTATOR_ROLE_ID or 0)
-
     if pr_id == 0 or sp_id == 0:
         return await interaction.followup.send(
             "❗ 参加/観戦ロールIDが未設定です。環境変数（PARTICIPANT_ROLE_ID / SPECTATOR_ROLE_ID）を設定するか、コマンド引数でロール指定してください。",
@@ -321,14 +346,13 @@ async def create_mystery_panel(
         duration=duration,
         note=note,
     )
-
     file = discord.File(io.BytesIO(panel_png), filename="mystery_panel.png")
 
-    # Embed構築（フッタにロールIDを埋めて永続Viewが拾う）
+    # Embed（フッタにロールIDを埋める）
     embed = discord.Embed(
         title="マーダーミステリー開催！",
         description="下のボタンから「参加希望 / 観戦希望」を選べます。",
-        color=discord.Color.gold()
+        color=discord.Color.gold(),
     )
     embed.set_image(url="attachment://mystery_panel.png")
     embed.set_footer(text=f"participant={pr_id}|spectator={sp_id}")
@@ -336,7 +360,7 @@ async def create_mystery_panel(
     view = MysterySignupView()
     await interaction.followup.send(file=file, embed=embed, view=view)
 
-# ========= /ping（動作確認） =========
+# ========= /ping（疎通確認） =========
 @app_commands.command(name="ping", description="疎通確認")
 @app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
 async def ping(interaction: discord.Interaction):
