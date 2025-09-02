@@ -21,7 +21,7 @@ DEFAULT_BG_IMAGE_URL = os.getenv("DEFAULT_BG_IMAGE_URL", "")
 ALLOWED_ROLE_ID = int(os.getenv("ALLOWED_ROLE_ID", "0") or 0)
 DEFAULT_PARTICIPANT_ROLE_ID = int(os.getenv("PARTICIPANT_ROLE_ID", "0") or 0)
 DEFAULT_SPECTATOR_ROLE_ID   = int(os.getenv("SPECTATOR_ROLE_ID", "0") or 0)
-FONT_URL = os.getenv("FONT_URL", "")  # 例: Noto Sans JP の直リンク
+FONT_URL = os.getenv("FONT_URL", "")  # 例: Noto Sans JP 直リンク
 
 # ========= ログ =========
 logging.basicConfig(
@@ -33,16 +33,15 @@ log = logging.getLogger("mysterybot")
 # ========= Intents / Bot =========
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True  # ロール付与に必要
-intents.message_content = True
+intents.members = True          # ロール付与に必要
+intents.message_content = True  # ← prefixコマンド(!debug_sync等)に必須
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# ========= フォント取得 =========
+# ========= フォント =========
 _FONT_CACHE_PATH = "/tmp/mystery_font.ttf"
 def get_font(size: int) -> ImageFont.ImageFont:
-    # 日本語フォントが指定されていればDLして使う
     if FONT_URL:
         try:
             if not os.path.exists(_FONT_CACHE_PATH):
@@ -53,20 +52,14 @@ def get_font(size: int) -> ImageFont.ImageFont:
             return ImageFont.truetype(_FONT_CACHE_PATH, size=size)
         except Exception as e:
             log.warning(f"FONT_URL取得失敗。デフォルトにフォールバック: {e}")
-    # フォールバック（日本語は豆腐の可能性あり）
-    try:
-        return ImageFont.load_default()
-    except Exception:
-        return ImageFont.load_default()
+    return ImageFont.load_default()
 
-# ========= テキスト描画ユーティリティ =========
+# ========= 画像ユーティリティ =========
 def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
                    font: ImageFont.ImageFont, fill=(255,255,255),
                    max_width: int = 800, line_spacing: int = 6):
-    """max_widthで簡易改行して描画、描画後の高さを返す"""
     if not text:
         return 0
-    # ざっくり1文字ずつ折り返し（日本語向け）
     lines, cur = [], ""
     for ch in list(text):
         test = cur + ch
@@ -76,9 +69,7 @@ def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
         else:
             lines.append(cur)
             cur = ch
-    if cur:
-        lines.append(cur)
-
+    if cur: lines.append(cur)
     x, y = xy
     total_h = 0
     for line in lines:
@@ -116,15 +107,14 @@ def make_panel(
     bg = fetch_image(bg_url) if bg_url else None
     if bg:
         bg = ImageOps.fit(bg, (W, H), method=Image.Resampling.LANCZOS)
-        bg = bg.copy()
-        bg.putalpha(180)  # 透過でうっすら
+        bg = bg.copy(); bg.putalpha(180)
         base = Image.alpha_composite(base, bg)
 
     # 左の金ライン
     gold = Image.new("RGBA", (18, H), (212, 175, 55, 255))
     base.alpha_composite(gold, (0, 0))
 
-    # 右上コーナー画像（作品画像）
+    # 右上作品画像
     corner = fetch_image(corner_image_url) if corner_image_url else None
     if corner:
         thumb_w, thumb_h = 340, 340
@@ -134,7 +124,7 @@ def make_panel(
         mdraw.rounded_rectangle([0, 0, thumb_w, thumb_h], radius=28, fill=255)
         base.paste(corner, (W - thumb_w - 28, 28), mask)
 
-    # 半透明の本文パネル
+    # 本文パネル
     panel = Image.new("RGBA", (W - 80, H - 80), (0, 0, 0, 110))
     base.alpha_composite(panel, (40, 40))
 
@@ -144,18 +134,14 @@ def make_panel(
     font_title = get_font(48)
     draw.text((70, 60), title, font=font_title, fill=(255, 255, 255))
 
-    # 情報
-    font_label = get_font(28)
-    font_text  = get_font(30)
-    y = 140
-    line_gap = 16
-
+    # ラベル
+    font_label = get_font(28); font_text = get_font(30)
+    y = 140; line_gap = 16
     def put(label: str, value: str):
         nonlocal y
         draw.text((74, y), label, font=font_label, fill=(220, 220, 220))
         draw.text((240, y-2), value, font=font_text, fill=(255, 255, 255))
         y += (font_text.size + line_gap)
-
     put("開催予定日", date_time)
     put("プレイヤー数", f"{players} 名")
     put("想定プレイ時間", duration)
@@ -166,17 +152,15 @@ def make_panel(
     y += draw_multiline(draw, note, (74, y), font=get_font(28), fill=(245, 245, 245), max_width=W - 74 - 380)
 
     # 署名
-    font_small = get_font(20)
-    draw.text((70, H - 40), "マーダーミステリー開催のお知らせ", font=font_small, fill=(200, 200, 200))
+    draw.text((70, H - 40), "マーダーミステリー開催のお知らせ", font=get_font(20), fill=(200, 200, 200))
 
     buf = io.BytesIO()
     base.convert("RGB").save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf.getvalue()
 
-# ========= 永続View（ボタン） =========
+# ========= 永続View =========
 class MysterySignupView(discord.ui.View):
-    """custom_id固定の永続View。再起動後も反応。"""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -192,24 +176,19 @@ class MysterySignupView(discord.ui.View):
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("ギルド外では操作できません。", ephemeral=True)
-
         try:
-            # このメッセージのEmbedフッタから role_id を読み取る
             msg = await interaction.channel.fetch_message(interaction.message.id)
             embed = msg.embeds[0] if msg.embeds else None
             footer = embed.footer.text if embed and embed.footer else ""
-            participant_id = None
-            spectator_id = None
+            participant_id = spectator_id = None
             for part in (footer or "").split("|"):
                 if part.startswith("participant="):
                     participant_id = int(part.split("=", 1)[1])
                 elif part.startswith("spectator="):
                     spectator_id = int(part.split("=", 1)[1])
-
             target_role_id = participant_id if role_kind == "participant" else spectator_id
             if not target_role_id:
                 return await interaction.response.send_message("ロールIDが設定されていません。パネル作成時の設定をご確認ください。", ephemeral=True)
-
             role = guild.get_role(target_role_id)
             if role is None:
                 return await interaction.response.send_message("ロールが見つかりません。", ephemeral=True)
@@ -221,21 +200,18 @@ class MysterySignupView(discord.ui.View):
             else:
                 await member.add_roles(role, reason="Mystery panel toggle on")
                 return await interaction.response.send_message(f"✅ {role.name} を付与しました。", ephemeral=True)
-
-        except Exception as e:
-            log.exception("ロール切り替え時のエラー")
+        except Exception:
+            log.exception("ロール切替エラー")
             return await interaction.response.send_message("処理中にエラーが発生しました。", ephemeral=True)
 
-# ========= 起動時処理 =========
+# ========= 起動時 =========
 @bot.event
 async def on_ready():
     try:
-        bot.add_view(MysterySignupView())  # 永続View登録
+        bot.add_view(MysterySignupView())
     except Exception:
         pass
     log.info(f"Logged in as {bot.user} (id={bot.user.id})")
-
-    # スラコマ即時同期（ギルド限定）
     try:
         if GUILD_IDS:
             for gid in GUILD_IDS:
@@ -243,25 +219,23 @@ async def on_ready():
             log.info(f"Synced commands to guilds: {GUILD_IDS}")
         else:
             await tree.sync()
-            log.info("Synced commands globally (反映に時間がかかる場合あり)")
+            log.info("Synced commands globally")
     except Exception as e:
         log.warning(f"Slash command sync failed: {e}")
 
-# ========= 権限チェック =========
+# ========= 権限ヘルパ =========
 def is_allowed(interaction: discord.Interaction) -> bool:
     if ALLOWED_ROLE_ID == 0:
         return True
-    role = discord.utils.get(interaction.user.roles, id=ALLOWED_ROLE_ID)
-    return role is not None
+    return discord.utils.get(interaction.user.roles, id=ALLOWED_ROLE_ID) is not None
 
 def _is_admin_or_allowed(member: discord.Member) -> bool:
-    if member.guild_permissions.administrator:
-        return True
-    if ALLOWED_ROLE_ID and discord.utils.get(member.roles, id=ALLOWED_ROLE_ID):
-        return True
-    return False
+    return (
+        member.guild_permissions.administrator or
+        (ALLOWED_ROLE_ID and discord.utils.get(member.roles, id=ALLOWED_ROLE_ID))
+    )
 
-# ========= 強制同期系（テキストコマンド） =========
+# ========= 強制同期 (prefix) =========
 @bot.command(name="sync_here")
 async def sync_here(ctx: commands.Context):
     if not isinstance(ctx.author, discord.Member) or not _is_admin_or_allowed(ctx.author):
@@ -277,10 +251,9 @@ async def clear_and_sync(ctx: commands.Context):
     if not isinstance(ctx.author, discord.Member) or not _is_admin_or_allowed(ctx.author):
         return await ctx.reply("権限がありません。", mention_author=False)
     try:
-        tree.clear_commands(guild=ctx.guild)  # まず空を同期
-        await tree.sync(guild=ctx.guild)
-        # もう一度、コード上の定義で再同期
-        await tree.sync(guild=ctx.guild)
+        tree.clear_commands(guild=ctx.guild)
+        await tree.sync(guild=ctx.guild)  # 空を同期
+        await tree.sync(guild=ctx.guild)  # 再同期
         await ctx.reply("🧹→🔁 ギルドコマンドをクリアして再同期しました。", mention_author=False)
     except Exception as e:
         await ctx.reply(f"❌ クリア＆同期失敗: {e}", mention_author=False)
@@ -295,6 +268,48 @@ async def list_cmds(ctx: commands.Context):
         await ctx.reply(f"このギルドの登録コマンド: {names}", mention_author=False)
     except Exception as e:
         await ctx.reply(f"❌ 取得失敗: {e}", mention_author=False)
+
+# ========= デバッグ可視化 & 修復 (prefix) =========
+@bot.command(name="debug_sync")
+async def debug_sync(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not ctx.author.guild_permissions.administrator:
+        return await ctx.reply("権限がありません。", mention_author=False)
+    local = tree.get_commands(guild=ctx.guild)
+    local_names = [c.name for c in local]
+    remote_guild = await tree.fetch_commands(guild=ctx.guild)
+    remote_global = await tree.fetch_commands()
+    msg = (
+        "【ローカル】" + (", ".join(local_names) or "(なし)") + "\n"
+        f"【リモートGuild】{len(remote_guild)} 件\n"
+        f"【リモートGlobal】{len(remote_global)} 件"
+    )
+    await ctx.reply(msg, mention_author=False)
+
+@bot.command(name="repair_sync")
+async def repair_sync(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not ctx.author.guild_permissions.administrator:
+        return await ctx.reply("権限がありません。", mention_author=False)
+    try:
+        remote_guild = await tree.fetch_commands(guild=ctx.guild)
+        if len(remote_guild) == 0:
+            tree.clear_commands(guild=ctx.guild)
+            await tree.sync(guild=ctx.guild)     # 空同期
+            # もう一度通常の登録
+            if GUILD_IDS:
+                for gid in GUILD_IDS:
+                    await tree.sync(guild=discord.Object(id=gid))
+            else:
+                await tree.sync()
+        local_after = [c.name for c in tree.get_commands(guild=ctx.guild)]
+        remote_after = await tree.fetch_commands(guild=ctx.guild)
+        await ctx.reply(
+            "修復完了\n"
+            f"【ローカル】{', '.join(local_after) or '(なし)'}\n"
+            f"【リモートGuild】{len(remote_after)} 件",
+            mention_author=False
+        )
+    except Exception as e:
+        await ctx.reply(f"❌ 修復中エラー: {e}", mention_author=False)
 
 # ========= /create_mystery_panel =========
 @app_commands.describe(
@@ -327,7 +342,6 @@ async def create_mystery_panel(
 
     await interaction.response.defer(thinking=True, ephemeral=False)
 
-    # ロール決定
     pr_id = participant_role.id if participant_role else (DEFAULT_PARTICIPANT_ROLE_ID or 0)
     sp_id = spectator_role.id if spectator_role else (DEFAULT_SPECTATOR_ROLE_ID or 0)
     if pr_id == 0 or sp_id == 0:
@@ -336,7 +350,6 @@ async def create_mystery_panel(
             ephemeral=True,
         )
 
-    # 画像合成
     panel_png = make_panel(
         bg_url=bg_image_url or DEFAULT_BG_IMAGE_URL,
         corner_image_url=corner_image_url or "",
@@ -348,7 +361,6 @@ async def create_mystery_panel(
     )
     file = discord.File(io.BytesIO(panel_png), filename="mystery_panel.png")
 
-    # Embed（フッタにロールIDを埋める）
     embed = discord.Embed(
         title="マーダーミステリー開催！",
         description="下のボタンから「参加希望 / 観戦希望」を選べます。",
@@ -360,7 +372,7 @@ async def create_mystery_panel(
     view = MysterySignupView()
     await interaction.followup.send(file=file, embed=embed, view=view)
 
-# ========= /ping（疎通確認） =========
+# ========= /ping =========
 @app_commands.command(name="ping", description="疎通確認")
 @app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
 async def ping(interaction: discord.Interaction):
@@ -380,4 +392,3 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN が未設定です。")
     bot.run(DISCORD_TOKEN)
-
