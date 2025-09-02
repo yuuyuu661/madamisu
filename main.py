@@ -1,8 +1,12 @@
 import os
 import io
+import csv
 import base64
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from collections import defaultdict
 
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -22,6 +26,11 @@ DEFAULT_BG_IMAGE_URL = os.getenv("DEFAULT_BG_IMAGE_URL", "")
 ALLOWED_ROLE_ID = int(os.getenv("ALLOWED_ROLE_ID", "0") or 0)
 DEFAULT_PARTICIPANT_ROLE_ID = int(os.getenv("PARTICIPANT_ROLE_ID", "0") or 0)
 DEFAULT_SPECTATOR_ROLE_ID   = int(os.getenv("SPECTATOR_ROLE_ID", "0") or 0)
+
+# ログ保存とタイムゾーン
+LOG_CSV_PATH = os.getenv("LOG_CSV_PATH", "/data/mystery_history.csv")
+TIMEZONE = os.getenv("TIMEZONE", "Asia/Tokyo")
+TZ = ZoneInfo(TIMEZONE)
 
 # フォント（リポ同梱優先・URLフォールバック）
 FONT_PATH = os.getenv("FONT_PATH", "")   # 例: fonts/NotoSansJP-VariableFont_wght.ttf
@@ -55,10 +64,26 @@ log = logging.getLogger("mysterybot")
 # ========= Intents / Bot =========
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True          # ロール付与に必要
+intents.members = True          # ロール/メンバー取得・付与で必要
 intents.message_content = True  # prefixコマンド(!)用
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
+
+# ========= 「プレイ済み」キュー（メモリ保持・ギルド別） =========
+PLAYED_QUEUE: dict[int, set[int]] = defaultdict(set)
+
+def get_played_set(guild_id: int) -> set[int]:
+    return PLAYED_QUEUE[guild_id]
+
+def get_played_members(guild: discord.Guild) -> List[discord.Member]:
+    ids = list(get_played_set(guild.id))
+    members: List[discord.Member] = []
+    for uid in ids:
+        m = guild.get_member(uid)
+        if m:
+            members.append(m)
+    members.sort(key=lambda m: m.display_name.lower())
+    return members
 
 # ========= フォント取得 =========
 _FONT_CACHE_PATH = "/tmp/mystery_font.ttf"
@@ -127,11 +152,9 @@ def _reveal_payload(s: str) -> Optional[str]:
 def draw_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str, font: ImageFont.ImageFont,
               fill=(255, 255, 255), outline=(0, 0, 0),
               outline_w: int = 4, inline_w: int = 2):
-    # 外側：黒フチ（太め）
     if outline_w > 0:
         draw.text(xy, text, font=font, fill=fill,
                   stroke_width=outline_w, stroke_fill=outline)
-    # 内側：白ストローク（少し細く）→“太字化”＋黒フチを残す
     if inline_w > 0:
         draw.text(xy, text, font=font, fill=fill,
                   stroke_width=inline_w, stroke_fill=fill)
@@ -182,7 +205,7 @@ def make_panel(
     corner_image_url: str,
     title: str,
     date_time: str,
-    players: int,
+    players: str,  # ← 文字対応
     duration: str,
     note: str,
     canvas_size=(1200, 650),
@@ -230,6 +253,10 @@ def make_panel(
     y = 140
     line_gap = 16
 
+    def fmt_players(p: str) -> str:
+        s = str(p).strip()
+        return f"{s} 名" if s.isdigit() else s
+
     def put(label: str, value: str):
         nonlocal y
         draw_text(draw, (LABEL_X, y), label, font=font_label, fill=(220,220,220),
@@ -239,7 +266,7 @@ def make_panel(
         y += (font_text.size + line_gap)
 
     put("開催予定日", date_time)
-    put("プレイヤー数", f"{players} 名")
+    put("プレイヤー数", fmt_players(players))
     put("想定プレイ時間", duration)
 
     # 一言
@@ -260,7 +287,7 @@ def make_panel(
     buf.seek(0)
     return buf.getvalue()
 
-# ========= 永続View（参加/観戦トグル） =========
+# ========= 永続View（参加/観戦/プレイ済みトグル） =========
 class MysterySignupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -272,6 +299,19 @@ class MysterySignupView(discord.ui.View):
     @discord.ui.button(label="観戦希望", style=discord.ButtonStyle.primary, custom_id="mystery_watch")
     async def on_watch(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._toggle_role(interaction, role_kind="spectator")
+
+    @discord.ui.button(label="プレイ済み", style=discord.ButtonStyle.secondary, custom_id="mystery_played")
+    async def on_played(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild:
+            return await interaction.response.send_message("ギルド外では操作できません。", ephemeral=True)
+        s = get_played_set(interaction.guild.id)
+        uid = interaction.user.id
+        if uid in s:
+            s.remove(uid)
+            return await interaction.response.send_message("✅ プレイ済みから外しました。", ephemeral=True)
+        else:
+            s.add(uid)
+            return await interaction.response.send_message("✅ プレイ済みに追加しました。", ephemeral=True)
 
     async def _toggle_role(self, interaction: discord.Interaction, role_kind: str):
         guild = interaction.guild
@@ -309,28 +349,7 @@ class MysterySignupView(discord.ui.View):
             log.exception("ロール切替エラー")
             return await interaction.response.send_message("処理中にエラーが発生しました。", ephemeral=True)
 
-# ========= 起動時 =========
-@bot.event
-async def on_ready():
-    try:
-        bot.add_view(MysterySignupView())  # 永続View登録
-    except Exception:
-        pass
-    log.info(f"Logged in as {bot.user} (id={bot.user.id})")
-
-    # スラコマ即時同期
-    try:
-        if GUILD_IDS:
-            for gid in GUILD_IDS:
-                await tree.sync(guild=discord.Object(id=gid))
-            log.info(f"Synced commands to guilds: {GUILD_IDS}")
-        else:
-            await tree.sync()
-            log.info("Synced commands globally")
-    except Exception as e:
-        log.warning(f"Slash command sync failed: {e}")
-
-# ========= 権限ヘルパ =========
+# ========= ユーティリティ =========
 def is_allowed(interaction: discord.Interaction) -> bool:
     if ALLOWED_ROLE_ID == 0:
         return True
@@ -341,6 +360,44 @@ def _is_admin_or_allowed(member: discord.Member) -> bool:
         member.guild_permissions.administrator or
         (ALLOWED_ROLE_ID and discord.utils.get(member.roles, id=ALLOWED_ROLE_ID))
     )
+
+def _role_from_param_or_env(guild: discord.Guild, role_param: Optional[discord.Role], env_id: int) -> Optional[discord.Role]:
+    if role_param:
+        return role_param
+    if env_id:
+        return guild.get_role(env_id)
+    return None
+
+def _mentions(members: List[discord.Member], sep: str = " ") -> str:
+    if not members:
+        return "（なし）"
+    parts = [m.mention for m in members[:50]]
+    tail = f" …ほか{len(members)-50}名" if len(members) > 50 else ""
+    return sep.join(parts) + tail
+
+def _ensure_dirs(path: str):
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+
+# ========= 起動時 =========
+@bot.event
+async def on_ready():
+    try:
+        bot.add_view(MysterySignupView())  # 永続View登録
+    except Exception:
+        pass
+    log.info(f"Logged in as {bot.user} (id={bot.user.id})")
+    try:
+        if GUILD_IDS:
+            for gid in GUILD_IDS:
+                await tree.sync(guild=discord.Object(id=gid))
+            log.info(f"Synced commands to guilds: {GUILD_IDS}")
+        else:
+            await tree.sync()
+            log.info("Synced commands globally")
+    except Exception as e:
+        log.warning(f"Slash command sync failed: {e}")
 
 # ========= 強制同期/可視化/修復（prefix） =========
 @bot.command(name="sync_here")
@@ -359,8 +416,8 @@ async def clear_and_sync(ctx: commands.Context):
         return await ctx.reply("権限がありません。", mention_author=False)
     try:
         tree.clear_commands(guild=ctx.guild)
-        await tree.sync(guild=ctx.guild)  # 空を同期
-        await tree.sync(guild=ctx.guild)  # 再同期
+        await tree.sync(guild=ctx.guild)
+        await tree.sync(guild=ctx.guild)
         await ctx.reply("🧹→🔁 ギルドコマンドをクリアして再同期しました。", mention_author=False)
     except Exception as e:
         await ctx.reply(f"❌ クリア＆同期失敗: {e}", mention_author=False)
@@ -399,7 +456,7 @@ async def repair_sync(ctx: commands.Context):
         remote_guild = await tree.fetch_commands(guild=ctx.guild)
         if len(remote_guild) == 0:
             tree.clear_commands(guild=ctx.guild)
-            await tree.sync(guild=ctx.guild)     # 空同期
+            await tree.sync(guild=ctx.guild)
             if GUILD_IDS:
                 for gid in GUILD_IDS:
                     await tree.sync(guild=discord.Object(id=gid))
@@ -416,12 +473,12 @@ async def repair_sync(ctx: commands.Context):
     except Exception as e:
         await ctx.reply(f"❌ 修復中エラー: {e}", mention_author=False)
 
-# ========= スラッシュコマンド =========
+# ========= パネル生成 =========
 @tree.command(name="create_mystery_panel", description="マーダーミステリー開催パネルを生成します。")
 @app_commands.describe(
     title="パネル上部に表示するタイトル（例：マダミス開催告知）",
     date_time="開催予定日（例：2025年9月12日）",
-    players="プレイヤー数（例：6）",
+    players="プレイヤー数（数値なら『名』を自動付与／文字はそのまま）",
     duration="想定プレイ時間（例：2～3時間）",
     note="一言コメント（改行可）",
     bg_image_url="背景画像URL（未指定なら既定を使用）",
@@ -434,7 +491,7 @@ async def create_mystery_panel(
     interaction: discord.Interaction,
     title: str,
     date_time: str,
-    players: int,
+    players: str,  # ← 文字もOK
     duration: str,
     note: str,
     bg_image_url: Optional[str] = None,
@@ -447,8 +504,8 @@ async def create_mystery_panel(
 
     await interaction.response.defer(thinking=True, ephemeral=False)
 
-    pr_id = participant_role.id if participant_role else (DEFAULT_PARTICIPANT_ROLE_ID or 0)
-    sp_id = spectator_role.id if spectator_role else (DEFAULT_SPECTATOR_ROLE_ID or 0)
+    pr_id = (participant_role.id if participant_role else DEFAULT_PARTICIPANT_ROLE_ID) or 0
+    sp_id = (spectator_role.id if spectator_role else DEFAULT_SPECTATOR_ROLE_ID) or 0
     if pr_id == 0 or sp_id == 0:
         return await interaction.followup.send(
             "❗ 参加/観戦ロールIDが未設定です。環境変数（PARTICIPANT_ROLE_ID / SPECTATOR_ROLE_ID）を設定するか、コマンド引数でロール指定してください。",
@@ -460,7 +517,7 @@ async def create_mystery_panel(
         corner_image_url=corner_image_url or "",
         title=title,
         date_time=date_time,
-        players=players,
+        players=players,  # ← 文字OK
         duration=duration,
         note=note,
     )
@@ -468,7 +525,7 @@ async def create_mystery_panel(
 
     embed = discord.Embed(
         title="マーダーミステリー開催！",
-        description="下のボタンから「参加希望 / 観戦希望」を選べます。",
+        description="下のボタンから「参加希望 / 観戦希望 / プレイ済み」を選べます。",
         color=discord.Color.gold(),
     )
     embed.set_image(url="attachment://mystery_panel.png")
@@ -477,6 +534,153 @@ async def create_mystery_panel(
     view = MysterySignupView()
     await interaction.followup.send(file=file, embed=embed, view=view)
 
+# ========= 追加1：参加/観戦/プレイ済み リスト =========
+@tree.command(name="mystery_lists", description="参加希望・観戦希望・プレイ済みのリストを表示します。")
+@app_commands.describe(
+    participant_role="参加希望ロール（未指定なら環境変数）",
+    spectator_role="観戦希望ロール（未指定なら環境変数）",
+)
+@app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
+async def mystery_lists(
+    interaction: discord.Interaction,
+    participant_role: Optional[discord.Role] = None,
+    spectator_role: Optional[discord.Role] = None,
+):
+    if not _is_admin_or_allowed(interaction.user):
+        return await interaction.response.send_message("権限がありません。", ephemeral=True)
+
+    guild = interaction.guild
+    pr = _role_from_param_or_env(guild, participant_role, DEFAULT_PARTICIPANT_ROLE_ID)
+    sp = _role_from_param_or_env(guild, spectator_role, DEFAULT_SPECTATOR_ROLE_ID)
+
+    if not pr or not sp:
+        return await interaction.response.send_message("ロールが見つかりません（環境変数のID確認 or 引数で指定）。", ephemeral=True)
+
+    pr_members = sorted(pr.members, key=lambda m: m.display_name.lower())
+    sp_members = sorted(sp.members, key=lambda m: m.display_name.lower())
+    played_members = get_played_members(guild)
+
+    embed = discord.Embed(
+        title="参加/観戦/プレイ済み リスト",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(tz=TZ)
+    )
+    embed.add_field(name=f"参加希望（{len(pr_members)}人）", value=_mentions(pr_members, sep=' '), inline=False)
+    embed.add_field(name=f"観戦希望（{len(sp_members)}人）", value=_mentions(sp_members, sep=' '), inline=False)
+    embed.add_field(name=f"プレイ済み（{len(played_members)}人）", value=_mentions(played_members, sep=' '), inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+# ========= 追加2：参加履歴登録（ロール解除＋CSVログ＋プレイ済み消化） =========
+@tree.command(name="register_mystery_history", description="参加履歴を登録し、参加/観戦ロールを全員から外してプレイ済みも消化します。")
+@app_commands.describe(
+    scenario="シナリオ名",
+    participant_role="参加希望ロール（未指定なら環境変数）",
+    spectator_role="観戦希望ロール（未指定なら環境変数）",
+)
+@app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
+async def register_mystery_history(
+    interaction: discord.Interaction,
+    scenario: str,
+    participant_role: Optional[discord.Role] = None,
+    spectator_role: Optional[discord.Role] = None,
+):
+    if not _is_admin_or_allowed(interaction.user):
+        return await interaction.response.send_message("権限がありません。", ephemeral=True)
+
+    await interaction.response.defer(thinking=True)
+
+    guild = interaction.guild
+    pr = _role_from_param_or_env(guild, participant_role, DEFAULT_PARTICIPANT_ROLE_ID)
+    sp = _role_from_param_or_env(guild, spectator_role, DEFAULT_SPECTATOR_ROLE_ID)
+    if not pr or not sp:
+        return await interaction.followup.send("ロールが見つかりません（環境変数のID確認 or 引数で指定）。", ephemeral=True)
+
+    pr_members = list(pr.members)
+    sp_members = list(sp.members)
+    played_members = get_played_members(guild)
+    played_ids = [m.id for m in played_members]
+
+    # CSVへ追記
+    _ensure_dirs(LOG_CSV_PATH)
+    now = datetime.now(tz=TZ)
+    try:
+        new_file = not os.path.exists(LOG_CSV_PATH)
+        with open(LOG_CSV_PATH, "a", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["シナリオ名", "プレイ日時", "参加希望者リスト(IDs)", "観戦希望者リスト(IDs)", "プレイ済み(IDs)"])
+            w.writerow([
+                scenario,
+                now.strftime("%Y-%m-%d %H:%M"),
+                ",".join(str(m.id) for m in pr_members) or "-",
+                ",".join(str(m.id) for m in sp_members) or "-",
+                ",".join(str(uid) for uid in played_ids) or "-",
+            ])
+    except Exception:
+        log.exception("CSV書き込みエラー")
+
+    # ロール解除
+    removed_cnt = {"participant": 0, "spectator": 0}
+    try:
+        for m in pr_members:
+            try:
+                await m.remove_roles(pr, reason=f"[Mystery] 履歴登録: {scenario}")
+                removed_cnt["participant"] += 1
+            except discord.Forbidden:
+                pass
+        for m in sp_members:
+            try:
+                await m.remove_roles(sp, reason=f"[Mystery] 履歴登録: {scenario}")
+                removed_cnt["spectator"] += 1
+            except discord.Forbidden:
+                pass
+    except Exception:
+        log.exception("ロール解除中にエラー")
+
+    # プレイ済みキューをクリア
+    get_played_set(guild.id).clear()
+
+    # 結果をEmbedで
+    embed = discord.Embed(
+        title="参加履歴 登録",
+        description=f"**シナリオ名**: {scenario}\n**プレイ日時**: {now.strftime('%Y-%m-%d %H:%M')} ({TIMEZONE})",
+        color=discord.Color.green(),
+        timestamp=now,
+    )
+    embed.add_field(name=f"参加希望（{len(pr_members)}人／解除{removed_cnt['participant']}）", value=_mentions(pr_members), inline=False)
+    embed.add_field(name=f"観戦希望（{len(sp_members)}人／解除{removed_cnt['spectator']}）", value=_mentions(sp_members), inline=False)
+    embed.add_field(name=f"プレイ済み（{len(played_members)}人／消化{len(played_members)}）", value=_mentions(played_members), inline=False)
+    embed.set_footer(text="CSVにも追記しました（プレイ済みはキューをクリア）")
+
+    await interaction.followup.send(embed=embed)
+
+# ========= 追加3：VCに参加 =========
+@tree.command(name="vc_join", description="実行者がいるボイスチャンネルにBotが参加します。")
+@app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
+async def vc_join(interaction: discord.Interaction):
+    user = interaction.user
+    if not isinstance(user, discord.Member) or not user.voice or not user.voice.channel:
+        return await interaction.response.send_message("まずボイスチャンネルに参加してから実行してください。", ephemeral=True)
+
+    channel = user.voice.channel
+    try:
+        vc = interaction.guild.voice_client
+        if vc and vc.is_connected():
+            if vc.channel.id == channel.id:
+                return await interaction.response.send_message("すでにそのチャンネルに参加しています。", ephemeral=True)
+            await vc.move_to(channel)
+        else:
+            await channel.connect()
+        await interaction.response.send_message(f"✅ 参加しました：**{channel.name}**", ephemeral=True)
+    except Exception as e:
+        log.warning(f"VC join/move error: {e}")
+        try:
+            await interaction.response.send_message("接続できませんでしたが、処理は継続します。", ephemeral=True)
+        except:
+            await interaction.followup.send("接続できませんでしたが、処理は継続します。", ephemeral=True)
+
+# ========= ping =========
 @tree.command(name="ping", description="疎通確認")
 @app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
 async def ping(interaction: discord.Interaction):
