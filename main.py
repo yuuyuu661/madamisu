@@ -21,7 +21,7 @@ DEFAULT_BG_IMAGE_URL = os.getenv("DEFAULT_BG_IMAGE_URL", "")
 ALLOWED_ROLE_ID = int(os.getenv("ALLOWED_ROLE_ID", "0") or 0)
 DEFAULT_PARTICIPANT_ROLE_ID = int(os.getenv("PARTICIPANT_ROLE_ID", "0") or 0)
 DEFAULT_SPECTATOR_ROLE_ID   = int(os.getenv("SPECTATOR_ROLE_ID", "0") or 0)
-FONT_URL = os.getenv("FONT_URL", "")  # 例: Noto Sans JP 直リンク
+FONT_URL = os.getenv("FONT_URL", "")
 
 # ========= ログ =========
 logging.basicConfig(
@@ -34,7 +34,7 @@ log = logging.getLogger("mysterybot")
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True          # ロール付与に必要
-intents.message_content = True  # ← prefixコマンド(!debug_sync等)に必須
+intents.message_content = True  # prefix(!)コマンドに必要
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
@@ -103,18 +103,15 @@ def make_panel(
     W, H = canvas_size
     base = Image.new("RGBA", (W, H), (20, 22, 28, 255))
 
-    # 背景
     bg = fetch_image(bg_url) if bg_url else None
     if bg:
         bg = ImageOps.fit(bg, (W, H), method=Image.Resampling.LANCZOS)
         bg = bg.copy(); bg.putalpha(180)
         base = Image.alpha_composite(base, bg)
 
-    # 左の金ライン
     gold = Image.new("RGBA", (18, H), (212, 175, 55, 255))
     base.alpha_composite(gold, (0, 0))
 
-    # 右上作品画像
     corner = fetch_image(corner_image_url) if corner_image_url else None
     if corner:
         thumb_w, thumb_h = 340, 340
@@ -124,17 +121,13 @@ def make_panel(
         mdraw.rounded_rectangle([0, 0, thumb_w, thumb_h], radius=28, fill=255)
         base.paste(corner, (W - thumb_w - 28, 28), mask)
 
-    # 本文パネル
     panel = Image.new("RGBA", (W - 80, H - 80), (0, 0, 0, 110))
     base.alpha_composite(panel, (40, 40))
 
     draw = ImageDraw.Draw(base)
-
-    # タイトル
     font_title = get_font(48)
     draw.text((70, 60), title, font=font_title, fill=(255, 255, 255))
 
-    # ラベル
     font_label = get_font(28); font_text = get_font(30)
     y = 140; line_gap = 16
     def put(label: str, value: str):
@@ -146,12 +139,10 @@ def make_panel(
     put("プレイヤー数", f"{players} 名")
     put("想定プレイ時間", duration)
 
-    # 一言
     draw.text((74, y), "一言", font=font_label, fill=(220, 220, 220))
     y += font_label.size + 10
     y += draw_multiline(draw, note, (74, y), font=get_font(28), fill=(245, 245, 245), max_width=W - 74 - 380)
 
-    # 署名
     draw.text((70, H - 40), "マーダーミステリー開催のお知らせ", font=get_font(20), fill=(200, 200, 200))
 
     buf = io.BytesIO()
@@ -212,13 +203,14 @@ async def on_ready():
     except Exception:
         pass
     log.info(f"Logged in as {bot.user} (id={bot.user.id})")
+
     try:
         if GUILD_IDS:
             for gid in GUILD_IDS:
-                await tree.sync(guild=discord.Object(id=gid))
+                cmds = await tree.sync(guild=discord.Object(id=gid))
             log.info(f"Synced commands to guilds: {GUILD_IDS}")
         else:
-            await tree.sync()
+            cmds = await tree.sync()
             log.info("Synced commands globally")
     except Exception as e:
         log.warning(f"Slash command sync failed: {e}")
@@ -235,7 +227,7 @@ def _is_admin_or_allowed(member: discord.Member) -> bool:
         (ALLOWED_ROLE_ID and discord.utils.get(member.roles, id=ALLOWED_ROLE_ID))
     )
 
-# ========= 強制同期 (prefix) =========
+# ========= 強制同期/デバッグ (prefix) =========
 @bot.command(name="sync_here")
 async def sync_here(ctx: commands.Context):
     if not isinstance(ctx.author, discord.Member) or not _is_admin_or_allowed(ctx.author):
@@ -252,7 +244,7 @@ async def clear_and_sync(ctx: commands.Context):
         return await ctx.reply("権限がありません。", mention_author=False)
     try:
         tree.clear_commands(guild=ctx.guild)
-        await tree.sync(guild=ctx.guild)  # 空を同期
+        await tree.sync(guild=ctx.guild)  # 空同期
         await tree.sync(guild=ctx.guild)  # 再同期
         await ctx.reply("🧹→🔁 ギルドコマンドをクリアして再同期しました。", mention_author=False)
     except Exception as e:
@@ -269,7 +261,6 @@ async def list_cmds(ctx: commands.Context):
     except Exception as e:
         await ctx.reply(f"❌ 取得失敗: {e}", mention_author=False)
 
-# ========= デバッグ可視化 & 修復 (prefix) =========
 @bot.command(name="debug_sync")
 async def debug_sync(ctx: commands.Context):
     if not isinstance(ctx.author, discord.Member) or not ctx.author.guild_permissions.administrator:
@@ -294,7 +285,6 @@ async def repair_sync(ctx: commands.Context):
         if len(remote_guild) == 0:
             tree.clear_commands(guild=ctx.guild)
             await tree.sync(guild=ctx.guild)     # 空同期
-            # もう一度通常の登録
             if GUILD_IDS:
                 for gid in GUILD_IDS:
                     await tree.sync(guild=discord.Object(id=gid))
@@ -311,7 +301,8 @@ async def repair_sync(ctx: commands.Context):
     except Exception as e:
         await ctx.reply(f"❌ 修復中エラー: {e}", mention_author=False)
 
-# ========= /create_mystery_panel =========
+# ========= スラッシュコマンド（ここが @tree.command で重要） =========
+@tree.command(name="create_mystery_panel", description="マーダーミステリー開催パネルを生成します。")
 @app_commands.describe(
     title="パネル上部に表示するタイトル（例：マダミス開催告知）",
     date_time="開催予定日（例：2025年9月12日 20:00～）",
@@ -323,7 +314,6 @@ async def repair_sync(ctx: commands.Context):
     participant_role="参加希望で付与するロール（未指定なら環境変数）",
     spectator_role="観戦希望で付与するロール（未指定なら環境変数）",
 )
-@app_commands.command(name="create_mystery_panel", description="マーダーミステリー開催パネルを生成します。")
 @app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
 async def create_mystery_panel(
     interaction: discord.Interaction,
@@ -372,8 +362,7 @@ async def create_mystery_panel(
     view = MysterySignupView()
     await interaction.followup.send(file=file, embed=embed, view=view)
 
-# ========= /ping =========
-@app_commands.command(name="ping", description="疎通確認")
+@tree.command(name="ping", description="疎通確認")
 @app_commands.guilds(*[discord.Object(id=g) for g in GUILD_IDS] if GUILD_IDS else [])
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("pong", ephemeral=True)
