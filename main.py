@@ -27,6 +27,20 @@ DEFAULT_SPECTATOR_ROLE_ID   = int(os.getenv("SPECTATOR_ROLE_ID", "0") or 0)
 FONT_PATH = os.getenv("FONT_PATH", "")   # 例: fonts/NotoSansJP-VariableFont_wght.ttf
 FONT_URL  = os.getenv("FONT_URL", "")    # 直リンク(.otf/.ttf)を使う場合のみ
 
+# ========= 表示チューニング =========
+FONT_SCALE = float(os.getenv("FONT_SCALE", "1.0"))  # 全体倍率 例: 1.1 / 1.2
+TITLE_SIZE  = int(56 * FONT_SCALE)  # 旧48
+LABEL_SIZE  = int(32 * FONT_SCALE)  # 旧28
+VALUE_SIZE  = int(34 * FONT_SCALE)  # 旧30
+NOTE_SIZE   = int(30 * FONT_SCALE)  # 旧28
+FOOTER_SIZE = int(22 * FONT_SCALE)  # 旧20
+
+STROKE_TITLE = int(os.getenv("STROKE_TITLE", "4"))  # タイトルのフチ太さ
+STROKE_BODY  = int(os.getenv("STROKE_BODY",  "3"))  # 本文・値・一言のフチ太さ
+
+LABEL_X = int(os.getenv("LABEL_X", "74"))
+VALUE_X = int(os.getenv("VALUE_X", "360"))  # 値の列のX座標（380〜420などで微調整可）
+
 # ========= ログ =========
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -63,14 +77,12 @@ def _resolve_font_path() -> Optional[str]:
     return None
 
 def get_font(size: int) -> ImageFont.ImageFont:
-    # 1) リポ同梱（推奨）
     local = _resolve_font_path()
     if local:
         try:
             return ImageFont.truetype(local, size=size)
         except Exception as e:
             log.warning(f"FONT_PATH 読込失敗: {e}")
-    # 2) URL（任意）
     if FONT_URL:
         try:
             if not os.path.exists(_FONT_CACHE_PATH):
@@ -81,20 +93,17 @@ def get_font(size: int) -> ImageFont.ImageFont:
             return ImageFont.truetype(_FONT_CACHE_PATH, size=size)
         except Exception as e:
             log.warning(f"FONT_URL取得失敗。デフォルトにフォールバック: {e}")
-    # 3) フォールバック（日本語は豆腐）
-    return ImageFont.load_default()
+    return ImageFont.load_default()  # 日本語は豆腐
 
 # ========= 不可視ペイロード（ゼロ幅） =========
 _ZW0, _ZW1, _ZWPREFIX = '\u200B', '\u200C', '\u200D'  # ZWSP/ZWNJ/ZWJ
 
 def _hide_payload(s: str) -> str:
-    """文字列をゼロ幅文字列に変換（見た目は空）。"""
     b64 = base64.b64encode(s.encode('utf-8'))
     bits = ''.join(f'{b:08b}' for b in b64)
     return _ZWPREFIX + ''.join(_ZW1 if bit == '1' else _ZW0 for bit in bits)
 
 def _reveal_payload(s: str) -> Optional[str]:
-    """ゼロ幅文字列から元の文字列を復元。失敗時は None。"""
     if not s:
         return None
     if s.startswith(_ZWPREFIX):
@@ -106,17 +115,14 @@ def _reveal_payload(s: str) -> Optional[str]:
             return base64.b64decode(data).decode('utf-8')
         except Exception:
             return None
-    if 'participant=' in s and 'spectator=' in s:
+    if 'participant=' in s and 'spectator=' in s:  # 互換
         return s
     return None
 
-# ========= テキスト描画ユーティリティ（Pillow10対応） =========
+# ========= テキスト描画（白＋黒フチ、Pillow10対応） =========
 def draw_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str,
               font: ImageFont.ImageFont, fill=(255, 255, 255),
               bold: bool = True, stroke_width: int = 3, outline=(0, 0, 0)):
-    """
-    白塗り＋黒フチ（stroke）で視認性UP。
-    """
     if bold:
         draw.text(xy, text, font=font, fill=fill,
                   stroke_width=stroke_width, stroke_fill=outline)
@@ -166,7 +172,7 @@ def fetch_image(url: str) -> Optional[Image.Image]:
         log.warning(f"画像取得失敗: {url} ({e})")
         return None
 
-# ========= パネル生成（値を右寄せ／白＋黒フチ／黒幕オフ） =========
+# ========= パネル生成（値右寄せ／白＋黒フチ／黒幕なし） =========
 def make_panel(
     bg_url: str,
     corner_image_url: str,
@@ -176,8 +182,8 @@ def make_panel(
     duration: str,
     note: str,
     canvas_size=(1200, 650),
-    bg_alpha: int = 255,    # 背景の減光（255 = 減光なし / 180くらいで少し暗く）
-    panel_opacity: int = 0, # 本文の半透明板（0 = なし / 110くらいで復活）
+    bg_alpha: int = 255,    # 255=減光なし / 180で少し暗く
+    panel_opacity: int = 0, # 0=幕なし / 110で半透明板
 ) -> bytes:
     W, H = canvas_size
     base = Image.new("RGBA", (W, H), (20, 22, 28, 255))
@@ -202,7 +208,7 @@ def make_panel(
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, thumb_w, thumb_h], radius=28, fill=255)
         base.paste(corner, (W - thumb_w - 28, 28), mask)
 
-    # 本文の半透明板（既定は非表示）
+    # 半透明パネル（既定は非表示）
     if panel_opacity > 0:
         panel = Image.new("RGBA", (W - 80, H - 80), (0, 0, 0, panel_opacity))
         base.alpha_composite(panel, (40, 40))
@@ -210,21 +216,22 @@ def make_panel(
     draw = ImageDraw.Draw(base)
 
     # タイトル
-    font_title = get_font(48)
-    draw_text(draw, (70, 60), title, font=font_title, fill=(255, 255, 255), bold=True, stroke_width=3)
+    font_title = get_font(TITLE_SIZE)
+    draw_text(draw, (70, 60), title, font=font_title,
+              fill=(255, 255, 255), bold=True, stroke_width=STROKE_TITLE)
 
     # ラベル＆値（値だけ右へ）
-    font_label = get_font(28)
-    font_text  = get_font(30)
+    font_label = get_font(LABEL_SIZE)
+    font_text  = get_font(VALUE_SIZE)
     y = 140
     line_gap = 16
-    LABEL_X = 74
-    VALUE_X = 360  # 調整はここ（380〜420など好みで）
 
     def put(label: str, value: str):
         nonlocal y
-        draw_text(draw, (LABEL_X, y), label, font=font_label, fill=(220, 220, 220), bold=True, stroke_width=3)
-        draw_text(draw, (VALUE_X, y-2), value, font=font_text,  fill=(255, 255, 255), bold=True, stroke_width=3)
+        draw_text(draw, (LABEL_X, y), label, font=font_label,
+                  fill=(220, 220, 220), bold=True, stroke_width=STROKE_BODY)
+        draw_text(draw, (VALUE_X, y-2), value, font=font_text,
+                  fill=(255, 255, 255), bold=True, stroke_width=STROKE_BODY)
         y += (font_text.size + line_gap)
 
     put("開催予定日", date_time)
@@ -232,15 +239,17 @@ def make_panel(
     put("想定プレイ時間", duration)
 
     # 一言
-    draw_text(draw, (LABEL_X, y), "一言", font=font_label, fill=(220, 220, 220), bold=True, stroke_width=3)
+    draw_text(draw, (LABEL_X, y), "一言", font=font_label,
+              fill=(220, 220, 220), bold=True, stroke_width=STROKE_BODY)
     y += font_label.size + 10
-    y += draw_multiline(draw, note, (LABEL_X, y), font=get_font(28),
+    y += draw_multiline(draw, note, (LABEL_X, y), font=get_font(NOTE_SIZE),
                         fill=(245, 245, 245), max_width=W - LABEL_X - 380,
-                        bold=True, stroke_width=3)
+                        bold=True, stroke_width=STROKE_BODY)
 
     # 署名
     draw_text(draw, (70, H - 40), "マーダーミステリー開催のお知らせ",
-              font=get_font(20), fill=(200, 200, 200), bold=True, stroke_width=2)
+              font=get_font(FOOTER_SIZE), fill=(200, 200, 200),
+              bold=True, stroke_width=STROKE_BODY)
 
     buf = io.BytesIO()
     base.convert("RGB").save(buf, format="PNG", optimize=True)
@@ -403,7 +412,7 @@ async def repair_sync(ctx: commands.Context):
     except Exception as e:
         await ctx.reply(f"❌ 修復中エラー: {e}", mention_author=False)
 
-# ========= スラッシュコマンド（@tree.command で確実登録） =========
+# ========= スラッシュコマンド =========
 @tree.command(name="create_mystery_panel", description="マーダーミステリー開催パネルを生成します。")
 @app_commands.describe(
     title="パネル上部に表示するタイトル（例：マダミス開催告知）",
@@ -459,8 +468,7 @@ async def create_mystery_panel(
         color=discord.Color.gold(),
     )
     embed.set_image(url="attachment://mystery_panel.png")
-    # ロールIDは不可視で埋め込み（UIには表示されない）
-    embed.set_footer(text=_hide_payload(f"participant={pr_id}|spectator={sp_id}"))
+    embed.set_footer(text=_hide_payload(f"participant={pr_id}|spectator={sp_id}"))  # UIには表示されない
 
     view = MysterySignupView()
     await interaction.followup.send(file=file, embed=embed, view=view)
