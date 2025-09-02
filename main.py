@@ -58,18 +58,30 @@ def get_font(size: int) -> ImageFont.ImageFont:
 def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
                    font: ImageFont.ImageFont, fill=(255,255,255),
                    max_width: int = 800, line_spacing: int = 6):
+    """
+    Pillow 10以降: textsize() 廃止 → textbbox() で幅計測。
+    max_widthを超えないように1文字ずつ折り返して描画、描画後の高さを返す。
+    """
     if not text:
         return 0
+
+    def text_w(s: str) -> int:
+        # textbbox は (left, top, right, bottom) を返す
+        l, t, r, b = draw.textbbox((0, 0), s, font=font)
+        return r - l
+
+    # 日本語向けに1文字ずつ折り返し
     lines, cur = [], ""
     for ch in list(text):
         test = cur + ch
-        w, _ = draw.textsize(test, font=font)
-        if w <= max_width:
+        if text_w(test) <= max_width:
             cur = test
         else:
             lines.append(cur)
             cur = ch
-    if cur: lines.append(cur)
+    if cur:
+        lines.append(cur)
+
     x, y = xy
     total_h = 0
     for line in lines:
@@ -77,6 +89,7 @@ def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
         bbox = font.getbbox(line)
         lh = bbox[3] - bbox[1]
         total_h += lh + line_spacing
+
     return total_h
 
 def fetch_image(url: str) -> Optional[Image.Image]:
@@ -381,3 +394,4 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN が未設定です。")
     bot.run(DISCORD_TOKEN)
+
