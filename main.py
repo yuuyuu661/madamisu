@@ -22,9 +22,9 @@ ALLOWED_ROLE_ID = int(os.getenv("ALLOWED_ROLE_ID", "0") or 0)
 DEFAULT_PARTICIPANT_ROLE_ID = int(os.getenv("PARTICIPANT_ROLE_ID", "0") or 0)
 DEFAULT_SPECTATOR_ROLE_ID   = int(os.getenv("SPECTATOR_ROLE_ID", "0") or 0)
 
-# フォント（ローカル優先・URLフォールバック）
-FONT_PATH = os.getenv("FONT_PATH", "")   # 例: fonts/NotoSansJP-Regular.otf
-FONT_URL  = os.getenv("FONT_URL", "")    # 例: https://.../NotoSansJP-Regular.otf
+# フォント（リポ同梱優先・URLフォールバック）
+FONT_PATH = os.getenv("FONT_PATH", "")   # 例: fonts/NotoSansJP-VariableFont_wght.ttf
+FONT_URL  = os.getenv("FONT_URL", "")    # 直リンク(.otf/.ttf)を使う場合のみ
 
 # ========= ログ =========
 logging.basicConfig(
@@ -37,8 +37,7 @@ log = logging.getLogger("mysterybot")
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True          # ロール付与に必要
-intents.message_content = True  # prefix(!)コマンドに必要
-
+intents.message_content = True  # prefixコマンド(!)用
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
@@ -50,11 +49,10 @@ def _resolve_font_path() -> Optional[str]:
     if FONT_PATH:
         candidates.append(FONT_PATH)
     candidates += [
+        "fonts/NotoSansJP-VariableFont_wght.ttf",
         "fonts/NotoSansJP-Regular.otf",
         "fonts/NotoSansJP-Regular.ttf",
-        "fonts/NotoSansJP-VariableFont_wght.ttf",
         "fonts/NotoSerifJP-Regular.otf",
-        # 環境によっては存在する共通パス
         "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf",
     ]
@@ -71,7 +69,6 @@ def get_font(size: int) -> ImageFont.ImageFont:
             return ImageFont.truetype(local, size=size)
         except Exception as e:
             log.warning(f"FONT_PATH 読込失敗: {e}")
-
     # 2) URL（任意）
     if FONT_URL:
         try:
@@ -83,18 +80,27 @@ def get_font(size: int) -> ImageFont.ImageFont:
             return ImageFont.truetype(_FONT_CACHE_PATH, size=size)
         except Exception as e:
             log.warning(f"FONT_URL取得失敗。デフォルトにフォールバック: {e}")
-
-    # 3) フォールバック（※日本語は豆腐になります）
+    # 3) フォールバック（日本語は豆腐）
     return ImageFont.load_default()
 
-# ========= テキスト描画ユーティリティ（Pillow10対応） =========
+# ========= 太字描画ヘルパ =========
+def draw_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str,
+              font: ImageFont.ImageFont, fill=(255, 255, 255),
+              bold: bool = True, stroke_width: int = 2):
+    """
+    stroke_fill=fill で“太字風”に描画
+    """
+    if bold:
+        draw.text(xy, text, font=font, fill=fill,
+                  stroke_width=stroke_width, stroke_fill=fill)
+    else:
+        draw.text(xy, text, font=font, fill=fill)
+
+# ========= 複数行描画（Pillow10対応・太字） =========
 def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
                    font: ImageFont.ImageFont, fill=(255,255,255),
-                   max_width: int = 800, line_spacing: int = 6):
-    """
-    Pillow 10以降: textsize() 廃止 → textbbox() で幅計測。
-    max_widthを超えないように1文字ずつ折り返して描画、描画後の高さを返す。
-    """
+                   max_width: int = 800, line_spacing: int = 6,
+                   bold: bool = True, stroke_width: int = 2):
     if not text:
         return 0
 
@@ -116,12 +122,14 @@ def draw_multiline(draw: ImageDraw.ImageDraw, text: str, xy: Tuple[int, int],
     x, y = xy
     total_h = 0
     for line in lines:
-        draw.text((x, y + total_h), line, font=font, fill=fill)
+        draw_text(draw, (x, y + total_h), line, font=font, fill=fill,
+                  bold=bold, stroke_width=stroke_width)
         bbox = font.getbbox(line)
         lh = bbox[3] - bbox[1]
         total_h += lh + line_spacing
     return total_h
 
+# ========= 画像取得 =========
 def fetch_image(url: str) -> Optional[Image.Image]:
     if not url:
         return None
@@ -133,6 +141,7 @@ def fetch_image(url: str) -> Optional[Image.Image]:
         log.warning(f"画像取得失敗: {url} ({e})")
         return None
 
+# ========= パネル生成（値を右寄せ／全部太字／黒幕オフ） =========
 def make_panel(
     bg_url: str,
     corner_image_url: str,
@@ -142,6 +151,8 @@ def make_panel(
     duration: str,
     note: str,
     canvas_size=(1200, 650),
+    bg_alpha: int = 255,    # 背景の減光（255 = 減光なし / 180くらいで少し暗く）
+    panel_opacity: int = 0, # 本文の半透明板（0 = なし / 110くらいで復活）
 ) -> bytes:
     W, H = canvas_size
     base = Image.new("RGBA", (W, H), (20, 22, 28, 255))
@@ -150,64 +161,68 @@ def make_panel(
     bg = fetch_image(bg_url) if bg_url else None
     if bg:
         bg = ImageOps.fit(bg, (W, H), method=Image.Resampling.LANCZOS)
-        bg = bg.copy(); bg.putalpha(180)  # うっすら
+        bg = bg.copy()
+        bg.putalpha(max(0, min(255, bg_alpha)))
         base = Image.alpha_composite(base, bg)
 
     # 左の金ライン
-    gold = Image.new("RGBA", (18, H), (212, 175, 55, 255))
-    base.alpha_composite(gold, (0, 0))
+    base.alpha_composite(Image.new("RGBA", (18, H), (212, 175, 55, 255)), (0, 0))
 
-    # 右上コーナー画像（作品画像）
+    # 右上コーナー画像
     corner = fetch_image(corner_image_url) if corner_image_url else None
     if corner:
         thumb_w, thumb_h = 340, 340
         corner = ImageOps.fit(corner, (thumb_w, thumb_h), method=Image.Resampling.LANCZOS)
         mask = Image.new("L", (thumb_w, thumb_h), 0)
-        mdraw = ImageDraw.Draw(mask)
-        mdraw.rounded_rectangle([0, 0, thumb_w, thumb_h], radius=28, fill=255)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, thumb_w, thumb_h], radius=28, fill=255)
         base.paste(corner, (W - thumb_w - 28, 28), mask)
 
-    # 半透明の本文パネル
-    panel = Image.new("RGBA", (W - 80, H - 80), (0, 0, 0, 110))
-    base.alpha_composite(panel, (40, 40))
+    # 本文の半透明板（既定は非表示）
+    if panel_opacity > 0:
+        panel = Image.new("RGBA", (W - 80, H - 80), (0, 0, 0, panel_opacity))
+        base.alpha_composite(panel, (40, 40))
 
     draw = ImageDraw.Draw(base)
 
-    # タイトル
+    # タイトル（太字）
     font_title = get_font(48)
-    draw.text((70, 60), title, font=font_title, fill=(255, 255, 255))
+    draw_text(draw, (70, 60), title, font=font_title, fill=(255, 255, 255), bold=True, stroke_width=2)
 
-    # 情報
+    # ラベル＆値（値だけ右にずらす）
     font_label = get_font(28)
     font_text  = get_font(30)
     y = 140
     line_gap = 16
+    LABEL_X = 74
+    VALUE_X = 360  # ← 位置は好みで 380〜420 などに
 
     def put(label: str, value: str):
         nonlocal y
-        draw.text((74, y), label, font=font_label, fill=(220, 220, 220))
-        draw.text((240, y-2), value, font=font_text, fill=(255, 255, 255))
+        draw_text(draw, (LABEL_X, y), label, font=font_label, fill=(220, 220, 220), bold=True, stroke_width=2)
+        draw_text(draw, (VALUE_X, y-2), value, font=font_text,  fill=(255, 255, 255), bold=True, stroke_width=2)
         y += (font_text.size + line_gap)
 
     put("開催予定日", date_time)
     put("プレイヤー数", f"{players} 名")
     put("想定プレイ時間", duration)
 
-    # 一言
-    draw.text((74, y), "一言", font=font_label, fill=(220, 220, 220))
+    # 一言（太字）
+    draw_text(draw, (LABEL_X, y), "一言", font=font_label, fill=(220, 220, 220), bold=True, stroke_width=2)
     y += font_label.size + 10
-    y += draw_multiline(draw, note, (74, y), font=get_font(28), fill=(245, 245, 245), max_width=W - 74 - 380)
+    y += draw_multiline(draw, note, (LABEL_X, y), font=get_font(28),
+                        fill=(245, 245, 245), max_width=W - LABEL_X - 380,
+                        bold=True, stroke_width=2)
 
-    # 署名
-    font_small = get_font(20)
-    draw.text((70, H - 40), "マーダーミステリー開催のお知らせ", font=font_small, fill=(200, 200, 200))
+    # 署名（太字）
+    draw_text(draw, (70, H - 40), "マーダーミステリー開催のお知らせ",
+              font=get_font(20), fill=(200, 200, 200), bold=True, stroke_width=2)
 
     buf = io.BytesIO()
     base.convert("RGB").save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf.getvalue()
 
-# ========= 永続View（ボタン） =========
+# ========= 永続View（参加/観戦トグル） =========
 class MysterySignupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -224,7 +239,6 @@ class MysterySignupView(discord.ui.View):
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("ギルド外では操作できません。", ephemeral=True)
-
         try:
             msg = await interaction.channel.fetch_message(interaction.message.id)
             embed = msg.embeds[0] if msg.embeds else None
@@ -235,11 +249,9 @@ class MysterySignupView(discord.ui.View):
                     participant_id = int(part.split("=", 1)[1])
                 elif part.startswith("spectator="):
                     spectator_id = int(part.split("=", 1)[1])
-
             target_role_id = participant_id if role_kind == "participant" else spectator_id
             if not target_role_id:
                 return await interaction.response.send_message("ロールIDが設定されていません。パネル作成時の設定をご確認ください。", ephemeral=True)
-
             role = guild.get_role(target_role_id)
             if role is None:
                 return await interaction.response.send_message("ロールが見つかりません。", ephemeral=True)
@@ -251,9 +263,8 @@ class MysterySignupView(discord.ui.View):
             else:
                 await member.add_roles(role, reason="Mystery panel toggle on")
                 return await interaction.response.send_message(f"✅ {role.name} を付与しました。", ephemeral=True)
-
         except Exception:
-            log.exception("ロール切り替え時のエラー")
+            log.exception("ロール切替エラー")
             return await interaction.response.send_message("処理中にエラーが発生しました。", ephemeral=True)
 
 # ========= 起動時 =========
