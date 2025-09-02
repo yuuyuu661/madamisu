@@ -34,7 +34,7 @@ log = logging.getLogger("mysterybot")
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True  # ロール付与に必要
-intents.message_content = False
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
@@ -380,3 +380,4 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN が未設定です。")
     bot.run(DISCORD_TOKEN)
+
